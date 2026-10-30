@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Guesstimate</title>
+  <meta name="description" content="Planning poker for estimating developer tasks.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🃏</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="./">🃏 Guesstimate</a>
+    <div class="topbar-right" id="topbar-right"></div>
+  </header>
+
+  <main id="app">
+    <p class="muted center">Loading…</p>
+  </main>
+
+  <template id="tpl-home">
+    <section class="home">
+      <h1>Planning poker for your team</h1>
+      <p class="lead">Create a room, share the link, and estimate together. No sign-up needed.</p>
+      <button class="btn btn-primary btn-lg" id="create-room">Create a room</button>
+      <form class="join-form" id="join-form">
+        <span class="muted">or join with a code</span>
+        <div class="row">
+          <input id="join-code" placeholder="e.g. k3x9pq" autocomplete="off" maxlength="12" required>
+          <button class="btn" type="submit">Join</button>
+        </div>
+      </form>
+    </section>
+  </template>
+
+  <template id="tpl-name">
+    <section class="name-gate">
+      <h2>What's your name?</h2>
+      <p class="muted">Shown to others in the room.</p>
+      <form id="name-form" class="row">
+        <input id="name-input" maxlength="40" placeholder="Your name" autocomplete="nickname" required>
+        <button class="btn btn-primary" type="submit">Join room</button>
+      </form>
+    </section>
+  </template>
+
+  <template id="tpl-room">
+    <section class="room">
+      <div class="room-head">
+        <input id="topic" class="topic" maxlength="200" placeholder="What are we estimating? (e.g. JIRA-123 Login form)">
+        <button class="btn" id="copy-link" title="Copy invite link">🔗 Copy invite link</button>
+      </div>
+
+      <div class="table" id="table">
+        <div class="players" id="players"></div>
+        <div class="table-center" id="table-center"></div>
+      </div>
+
+      <div class="deck-wrap">
+        <p class="muted deck-hint" id="deck-hint">Pick a card</p>
+        <div class="deck" id="deck"></div>
+      </div>
+    </section>
+  </template>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
