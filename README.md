@@ -16,11 +16,11 @@ Deck: 0, ½, 1, 2, 3, 5, 8, 13, 20, 40, 100, ? (not sure) and ☕ (need a break)
 ## How it works
 
 - `index.html`, `style.css`, `app.js`: no build step, just static files
-- Supabase tables `rooms` and `players` with Realtime enabled, so changes push to every browser instantly
+- Supabase stores rooms, players and tasks. The public key has **no direct table access**: everything goes through room-scoped database functions (`get_room`, `join_room`, `cast_vote`, …), so you can only see a room if you know its code
+- Other players' votes are hidden by the database until the host reveals
+- The database pings the room's Realtime channel on every change; card throws and presence (who's here / away) also use Realtime
+- Rooms with no activity for 24 hours are deleted automatically (hourly `pg_cron` job), including their tasks and players
 - Players are anonymous: a random ID and name are saved in the browser's localStorage
-- Players who close the tab disappear after about a minute (heartbeat every 20s)
-
-The Supabase publishable key in `app.js` is meant to be public; Row Level Security policies control what it can do.
 
 ## Hosting
 
