@@ -73,8 +73,6 @@ function currentRoom() {
   return /^[a-z0-9]{4,12}$/.test(code) ? code : null;
 }
 
-window.addEventListener('hashchange', route);
-route();
 
 function route() {
   leaveRoom();
@@ -448,3 +446,7 @@ function renderTasks() {
     }));
   }
 }
+
+// ---------- start ----------
+window.addEventListener('hashchange', route);
+route();
