@@ -41,7 +41,7 @@ function toast(msg) {
 
 function newRoomCode() {
   const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
-  const bytes = crypto.getRandomValues(new Uint8Array(6));
+  const bytes = crypto.getRandomValues(new Uint8Array(10));
   return Array.from(bytes, (b) => chars[b % chars.length]).join('');
 }
 
@@ -121,7 +121,7 @@ function renderHome() {
   $('#create-room').addEventListener('click', async (e) => {
     e.target.disabled = true;
     const code = newRoomCode();
-    const { error } = await sb.from('rooms').insert({ id: code, host_id: myId });
+    const { error } = await sb.rpc('create_room', { p_room: code, p_host: myId });
     if (error) { e.target.disabled = false; return toast('Could not create room: ' + error.message); }
     location.hash = code;
   });
@@ -179,61 +179,70 @@ function leaveRoom() {
 async function enterRoom(code) {
   app.innerHTML = '<p class="muted center">Joining room…</p>';
 
-  let { data, error } = await sb.from('rooms').select('*').eq('id', code).maybeSingle();
-  if (error) return fail('Couldn’t load room', error);
-  if (!data) {
-    // Opened a link to a room that doesn't exist yet: create it, and you're the host.
-    const ins = await sb.from('rooms').insert({ id: code, host_id: myId }).select().single();
-    if (ins.error) return fail('Couldn’t open room', ins.error);
-    data = ins.data;
-  } else if (!data.host_id) {
-    const upd = await sb.from('rooms').update({ host_id: myId }).eq('id', code).is('host_id', null).select().maybeSingle();
-    if (upd.data) data = upd.data;
-  }
+  // Joins (creating the room if it doesn't exist yet, with you as host) and
+  // returns the room snapshot in one call.
+  const { data, error } = await sb.rpc('join_room', { p_room: code, p_player: myId, p_name: myName });
+  if (error) return fail('Couldn’t join room', error);
   // The host closed this room and opened a new one: follow everyone there.
-  if (data.moved_to) { location.hash = data.moved_to; return; }
-  room = data;
+  if (data.room.moved_to) { location.hash = data.room.moved_to; return; }
 
-  const join = await sb.from('players').upsert({ id: myId, room_id: code, name: myName, vote: null, last_seen: now() });
-  if (join.error) return fail('Couldn’t join', join.error);
-
+  applySnapshot(data);
   renderRoomShell();
-  await Promise.all([loadPlayers(), loadTasks()]);
+  renderAll();
 
   channel = sb.channel('room-' + code, { config: { broadcast: { self: false }, presence: { key: myId } } })
     .on('broadcast', { event: 'throw' }, ({ payload }) => throwCard(payload))
+    // The database pings this channel whenever anything in the room changes.
+    .on('broadcast', { event: 'changed' }, scheduleRefresh)
     // Live presence: someone closing their tab disappears within seconds.
     .on('presence', { event: 'sync' }, onPresenceSync)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'players', filter: `room_id=eq.${code}` }, loadPlayers)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks', filter: `room_id=eq.${code}` }, loadTasks)
-    // Delete events can't be filtered by room, so refresh on any task delete.
-    .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'tasks' }, loadTasks)
-    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'rooms', filter: `id=eq.${code}` }, (p) => {
-      const prev = room;
-      room = p.new;
-      if (room.moved_to) {
-        toast('The host started a new room');
-        location.hash = room.moved_to;
-        return;
-      }
-      // New task focused, re-vote or new deck: votes were cleared, so re-read them.
-      const deckChanged = String(prev.deck) !== String(room.deck);
-      if (prev.current_task_id !== room.current_task_id || (prev.revealed && !room.revealed) || deckChanged) loadPlayers();
-      renderAll();
-    })
     .subscribe((status) => { if (status === 'SUBSCRIBED') trackMe(); });
 
   timers.push(setInterval(heartbeat, HEARTBEAT_MS));
-  timers.push(setInterval(loadPlayers, 15_000)); // fallback + hides players who left
+  timers.push(setInterval(refresh, 15_000)); // safety net in case a ping is missed
 }
 
 function fail(msg, error) {
   app.innerHTML = `<p class="center">${esc(msg)}: ${esc(error.message)}</p>`;
 }
 
+function applySnapshot(data) {
+  room = data.room;
+  allPlayers = data.players;
+  tasks = data.tasks;
+  computePlayers();
+}
+
+// Re-read the whole room. Coalesces bursts of change pings into one fetch.
+let refreshTimer = null;
+function scheduleRefresh() {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(refresh, 80);
+}
+
+async function refresh() {
+  if (!room) return;
+  const code = room.id;
+  const { data, error } = await sb.rpc('get_room', { p_room: code, p_player: myId });
+  if (error || !room || room.id !== code) return;
+  if (!data) {
+    leaveRoom();
+    topbarRight.innerHTML = '';
+    app.innerHTML = '<section class="name-gate"><h2>This room has closed</h2><a class="btn btn-primary" href="./">Back to start</a></section>';
+    return;
+  }
+  if (data.room.moved_to) {
+    toast('The host started a new room');
+    location.hash = data.room.moved_to;
+    return;
+  }
+  applySnapshot(data);
+  renderAll();
+}
+
 async function heartbeat() {
   if (!room) return;
-  await sb.from('players').update({ last_seen: now(), room_id: room.id, name: myName }).eq('id', myId);
+  await sb.rpc('heartbeat', { p_room: room.id, p_player: myId, p_name: myName });
 }
 // Tell the room whether we're here or away (tab in the background).
 function trackMe() {
@@ -242,7 +251,7 @@ function trackMe() {
 document.addEventListener('visibilitychange', () => {
   if (!room) return;
   trackMe();
-  if (!document.hidden) { heartbeat(); loadPlayers(); }
+  if (!document.hidden) { heartbeat(); refresh(); }
 });
 // Leave right away when the tab closes, instead of waiting for a timeout.
 addEventListener('pagehide', () => { channel?.untrack().catch(() => {}); });
@@ -255,8 +264,8 @@ function onPresenceSync() {
     // Same person in several tabs counts as away only if every tab is.
     presence.set(id, { away: metas.every((m) => m.away) });
   }
-  // Someone new showed up before their row reached us: fetch it.
-  if ([...presence.keys()].some((id) => !allPlayers.some((p) => p.id === id))) loadPlayers();
+  // Someone new showed up before we fetched them: re-read the room.
+  if ([...presence.keys()].some((id) => !allPlayers.some((p) => p.id === id))) refresh();
   else { computePlayers(); renderAll(); }
 }
 
@@ -271,21 +280,15 @@ function computePlayers() {
   }
 }
 
-async function loadPlayers() {
-  if (!room) return;
-  const { data, error } = await sb.from('players').select('*').eq('room_id', room.id).order('created_at');
-  if (error || !room) return;
-  allPlayers = data;
-  computePlayers();
-  renderAll();
+// Host changes to the room (see update_room in the database).
+async function patchRoom(patch) {
+  const { error } = await sb.rpc('update_room', { p_room: room.id, p_patch: patch });
+  if (error) toast('Something went wrong: ' + error.message);
+  return !error;
 }
 
-async function loadTasks() {
-  if (!room) return;
-  const { data, error } = await sb.from('tasks').select('*').eq('room_id', room.id).order('position').order('created_at');
-  if (error || !room) return;
-  tasks = data;
-  renderAll();
+function clearVotesLocally() {
+  allPlayers.forEach((p) => { p.vote = null; });
 }
 
 // ---------- actions ----------
@@ -295,44 +298,38 @@ async function vote(v) {
   const next = me?.vote === v ? null : v; // tap again to take it back
   if (me) me.vote = next;
   renderAll();
-  await sb.from('players').update({ vote: next, last_seen: now() }).eq('id', myId);
-}
-
-async function clearVotes() {
-  players.forEach((p) => { p.vote = null; });
-  await sb.from('players').update({ vote: null }).eq('room_id', room.id);
+  await sb.rpc('cast_vote', { p_room: room.id, p_player: myId, p_vote: next });
 }
 
 // Host only
 async function reveal() {
   if (!isHost()) return;
-  room.revealed = true; renderAll();
-  await sb.from('rooms').update({ revealed: true, updated_at: now() }).eq('id', room.id);
+  // Other people's votes only come back from the database once revealed.
+  if (await patchRoom({ revealed: true })) await refresh();
 }
 
 async function revote() {
   if (!isHost()) return;
   room.revealed = false;
-  await clearVotes();
+  clearVotesLocally();
   renderAll();
-  await sb.from('rooms').update({ revealed: false, updated_at: now() }).eq('id', room.id);
+  await patchRoom({ revealed: false, clear_votes: true });
 }
 
 async function focusTask(taskId) {
   if (!isHost()) return;
   room.current_task_id = taskId;
   room.revealed = false;
-  await clearVotes();
+  clearVotesLocally();
   renderAll();
-  await sb.from('rooms').update({ current_task_id: taskId, revealed: false, updated_at: now() }).eq('id', room.id);
+  await patchRoom({ current_task_id: taskId, revealed: false, clear_votes: true });
 }
 
 async function addTask(title) {
   if (!isHost()) return;
-  const { data, error } = await sb.from('tasks')
-    .insert({ room_id: room.id, title, position: Date.now() / 1000 }).select().single();
+  const { data, error } = await sb.rpc('add_task', { p_room: room.id, p_title: title });
   if (error) return toast('Couldn’t add task: ' + error.message);
-  tasks.push(data);
+  if (!tasks.some((t) => t.id === data.id)) tasks.push(data);
   renderAll();
   if (!room.current_task_id) focusTask(data.id);
 }
@@ -344,7 +341,7 @@ async function deleteTask(taskId) {
   tasks = tasks.filter((x) => x.id !== taskId);
   if (room.current_task_id === taskId) room.current_task_id = null;
   renderAll();
-  await sb.from('tasks').delete().eq('id', taskId);
+  await sb.rpc('delete_task', { p_room: room.id, p_task: taskId });
 }
 
 async function saveEstimate(value) {
@@ -352,7 +349,7 @@ async function saveEstimate(value) {
   const cur = currentTask();
   if (!cur) return;
   cur.estimate = value;
-  await sb.from('tasks').update({ estimate: value }).eq('id', cur.id);
+  await sb.rpc('set_estimate', { p_room: room.id, p_task: cur.id, p_estimate: value });
   // Move on to the next task without an estimate (after this one, then from the top).
   const idx = tasks.indexOf(cur);
   const next = [...tasks.slice(idx + 1), ...tasks.slice(0, idx)].find((t) => !t.estimate);
@@ -362,7 +359,7 @@ async function saveEstimate(value) {
 
 async function takeOverHost() {
   room.host_id = myId; renderAll();
-  await sb.from('rooms').update({ host_id: myId, updated_at: now() }).eq('id', room.id);
+  await patchRoom({ host_id: myId });
   toast('You’re now the host');
 }
 
@@ -371,9 +368,9 @@ async function startNewRoom() {
   if (!isHost()) return;
   if (!confirm('Close this room and move everyone to a new one?')) return;
   const code = newRoomCode();
-  const { error } = await sb.from('rooms').insert({ id: code, host_id: myId, deck: room.deck });
+  const { error } = await sb.rpc('create_room', { p_room: code, p_host: myId, p_deck: room.deck });
   if (error) return toast('Couldn’t create room: ' + error.message);
-  await sb.from('rooms').update({ moved_to: code, updated_at: now() }).eq('id', room.id);
+  await patchRoom({ moved_to: code });
   location.hash = code;
 }
 
@@ -384,10 +381,9 @@ async function saveDeck(text) {
   if (String(cards) === String(deck())) return;
   room.deck = cards;
   room.revealed = false;
-  await clearVotes();
+  clearVotesLocally();
   renderAll();
-  const { error: err } = await sb.from('rooms').update({ deck: cards, revealed: false, updated_at: now() }).eq('id', room.id);
-  toast(err ? 'Couldn’t save cards: ' + err.message : 'Cards updated');
+  if (await patchRoom({ deck: cards, revealed: false, clear_votes: true })) toast('Cards updated');
 }
 
 // ---------- card throwing ----------
