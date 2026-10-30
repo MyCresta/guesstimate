@@ -356,49 +356,81 @@ function seatCenter(playerId) {
   return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
 }
 
-// Animate an ace flying from the thrower to the target, spinning flat like a
-// pro card throw: fast at release, a slight curve, slowing as it lands.
-function throwCard({ from, to, suit }) {
+// A random point just outside one of the screen edges, far enough from the target.
+function offscreenStart(end, rand) {
+  const m = 70; // how far outside the viewport the card starts
+  let best = null;
+  for (let i = 0; i < 6; i++) {
+    const side = Math.floor(Math.random() * 4);
+    const p = side === 0 ? { x: rand(0, innerWidth), y: -m }                // top
+      : side === 1 ? { x: innerWidth + m, y: rand(0, innerHeight) }          // right
+      : side === 2 ? { x: rand(0, innerWidth), y: innerHeight + m }          // bottom
+      : { x: -m, y: rand(0, innerHeight) };                                  // left
+    const d = Math.hypot(p.x - end.x, p.y - end.y);
+    if (!best || d > best.d) best = { ...p, d };
+    if (d > 320) break;
+  }
+  return best;
+}
+
+const smoothstep = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+
+// Animate an ace flung in from a random screen edge. It flies like a real
+// thrown card: a fast-spinning plate whose plane is tilted toward the camera
+// and slowly precesses, wobbling more as it loses speed, sometimes tumbling
+// end over end, then settling flat and crooked on the target.
+function throwCard({ to, suit }) {
   const end = seatCenter(to);
   if (!end) return;
   const rand = (a, b) => a + Math.random() * (b - a);
-  let start = seatCenter(from);
-  if (!start) start = { x: rand(0, innerWidth), y: innerHeight + 40 }; // unknown thrower: from below
-  if (Math.hypot(end.x - start.x, end.y - start.y) < 20) start = { x: end.x + rand(-160, 160), y: end.y + 140 };
+  const sign = () => (Math.random() < 0.5 ? -1 : 1);
+  const start = offscreenStart(end, rand);
 
   end.x += rand(-14, 14);
   end.y += rand(-12, 12);
 
-  // Curve: a control point pushed sideways from the straight line.
+  // Path: a curve bending sideways, with a little lift like it was arced in.
   const dx = end.x - start.x, dy = end.y - start.y;
-  const dist = Math.hypot(dx, dy);
-  const bend = rand(0.12, 0.3) * dist * (Math.random() < 0.5 ? -1 : 1);
-  const ctrl = { x: start.x + dx / 2 - (dy / dist) * bend, y: start.y + dy / 2 + (dx / dist) * bend - rand(10, 50) };
+  const dist = Math.hypot(dx, dy) || 1;
+  const bend = rand(0.08, 0.25) * dist * sign();
+  const ctrl = { x: start.x + dx / 2 - (dy / dist) * bend, y: start.y + dy / 2 + (dx / dist) * bend - rand(20, 90) };
 
-  const spinDir = Math.random() < 0.5 ? -1 : 1;
-  const startRot = rand(-60, 60);
-  const totalSpin = spinDir * rand(900, 1620);   // 2.5–4.5 turns
-  const landTilt = rand(-35, 35);
-  const duration = Math.min(900, Math.max(420, dist * 1.3));
+  // Spin and attitude.
+  const spinDir = sign();
+  const startRot = rand(0, 360);
+  const totalSpin = spinDir * rand(1440, 2520);      // 4–7 full turns
+  const landRot = rand(-35, 35);                      // crooked final angle
+  const tiltX0 = rand(48, 70) * sign();               // plane tilted toward/away from camera
+  const tiltY0 = rand(-35, 35);
+  const precess = rand(1.2, 2.4) * sign();            // how much the tilt swings around
+  const wobbleFreq = rand(5, 8);
+  const tumble = Math.random() < 0.4 ? sign() * 360 : 0; // sometimes it flips over once
+  const duration = Math.min(1300, Math.max(650, dist * 0.8));
 
   const el = document.createElement('div');
   el.className = 'flying-card';
-  el.innerHTML = aceSvg(suit);
+  el.innerHTML = `<div class="fc-face">${aceSvg(suit)}</div><div class="fc-face fc-back"></div>`;
   document.body.appendChild(el);
 
-  const W = 30, H = 42;
+  const W = 34, H = 48;
   const frames = [];
-  const steps = 18;
+  const steps = 48;
   for (let i = 0; i <= steps; i++) {
     const lin = i / steps;
-    const t = 1 - Math.pow(1 - lin, 2.2); // ease-out: fast release, soft landing
+    const t = 1 - Math.pow(1 - lin, 2.4);             // fast release, soft landing
     const x = (1 - t) ** 2 * start.x + 2 * (1 - t) * t * ctrl.x + t ** 2 * end.x;
     const y = (1 - t) ** 2 * start.y + 2 * (1 - t) * t * ctrl.y + t ** 2 * end.y;
-    const rot = startRot + totalSpin * t + landTilt * t;
-    const scale = 1.25 - 0.3 * t + Math.sin(lin * Math.PI) * 0.15; // rises toward the camera mid-flight
-    const tiltX = Math.sin(lin * Math.PI) * 35;                      // a bit of 3D wobble
+
+    const settle = smoothstep(0.72, 1, lin);          // lies down flat at the end
+    const air = 1 - settle;
+    const spin = startRot + totalSpin * t + landRot * settle;
+    const wobble = Math.sin(lin * Math.PI * wobbleFreq) * (6 + 18 * lin) * air; // grows as it slows
+    const rx = tiltX0 * Math.cos(lin * Math.PI * precess) * air + wobble + tumble * smoothstep(0.15, 0.65, lin);
+    const ry = tiltY0 * Math.sin(lin * Math.PI * precess + 1) * air + wobble * 0.6;
+    const scale = 1.9 - 0.9 * t + Math.sin(lin * Math.PI) * 0.2; // big near the camera, shrinks onto the table
+
     frames.push({
-      transform: `translate(${x - W / 2}px, ${y - H / 2}px) rotate(${rot}deg) rotateX(${tiltX}deg) scale(${scale})`,
+      transform: `translate(${x - W / 2}px, ${y - H / 2}px) perspective(700px) rotateX(${rx}deg) rotateY(${ry}deg) rotateZ(${spin}deg) scale(${scale})`,
       offset: lin,
     });
   }
