@@ -1,37 +1,38 @@
 <!doctype html>
-<html lang="en">
+<html lang="sv">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Guesstimate</title>
+  <title>Plänning Påker</title>
   <meta name="description" content="Planning poker for estimating developer tasks.">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🃏</text></svg>">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 50 70'><rect x='2' y='2' width='46' height='66' rx='7' fill='%23fff8e8' stroke='%231b1a2e' stroke-width='4'/><text x='25' y='48' font-size='34' text-anchor='middle' fill='%23e8432f'>♥</text></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Fraunces:opsz,wght@9..144,700;9..144,900&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="./">🃏 Guesstimate</a>
+    <a class="brand" href="./">Plänning Påker</a>
     <div class="topbar-right" id="topbar-right"></div>
   </header>
 
   <main id="app">
-    <p class="muted center">Loading…</p>
+    <p class="muted center">Laddar…</p>
   </main>
 
   <template id="tpl-home">
     <section class="home">
-      <h1>Planning poker for your team</h1>
-      <p class="lead">Create a room, share the link, and estimate together. No sign-up needed.</p>
+      <div class="home-fan" aria-hidden="true">
+        <div class="pcard face fan-1"><span class="idx tl">8</span><span class="val">8</span><span class="idx br">8</span></div>
+        <div class="pcard face fan-2"><span class="idx tl">A</span><span class="val suit-red">♥</span><span class="idx br">A</span></div>
+        <div class="pcard face fan-3"><span class="idx tl">?</span><span class="val">?</span><span class="idx br">?</span></div>
+      </div>
+      <h1 class="title"><span>Plänning</span> <span>Påker</span></h1>
       <button class="btn btn-primary btn-lg" id="create-room">Create a room</button>
       <form class="join-form" id="join-form">
-        <span class="muted">or join with a code</span>
-        <div class="row">
-          <input id="join-code" placeholder="e.g. k3x9pq" autocomplete="off" maxlength="12" required>
-          <button class="btn" type="submit">Join</button>
-        </div>
+        <input id="join-code" placeholder="Room code" autocomplete="off" maxlength="12" required>
+        <button class="btn" type="submit">Join</button>
       </form>
     </section>
   </template>
@@ -39,10 +40,9 @@
   <template id="tpl-name">
     <section class="name-gate">
       <h2>What's your name?</h2>
-      <p class="muted">Shown to others in the room.</p>
       <form id="name-form" class="row">
         <input id="name-input" maxlength="40" placeholder="Your name" autocomplete="nickname" required>
-        <button class="btn btn-primary" type="submit">Join room</button>
+        <button class="btn btn-primary" type="submit">Join</button>
       </form>
     </section>
   </template>
@@ -63,6 +63,7 @@
             <div class="players" id="players"></div>
             <div class="table-center" id="table-center"></div>
           </div>
+          <p class="throw-hint">Tap a player to throw a card at them</p>
 
           <div class="deck-wrap">
             <p class="muted deck-hint" id="deck-hint">Pick a card</p>
@@ -70,16 +71,27 @@
           </div>
         </div>
 
-        <aside class="tasks-panel">
-          <div class="tasks-head">
-            <h3>Tasks</h3>
-            <span class="muted small" id="tasks-count"></span>
+        <aside class="side">
+          <div class="panel">
+            <div class="panel-head">
+              <h3>Tasks</h3>
+              <span class="muted small" id="tasks-count"></span>
+            </div>
+            <form class="row add-task" id="add-task">
+              <input id="task-input" maxlength="200" placeholder="Add a task" autocomplete="off" required>
+              <button class="btn" type="submit">Add</button>
+            </form>
+            <ol class="tasks" id="tasks"></ol>
           </div>
-          <form class="row add-task" id="add-task">
-            <input id="task-input" maxlength="200" placeholder="Add a task, e.g. JIRA-123 Login form" autocomplete="off" required>
-            <button class="btn" type="submit">Add</button>
-          </form>
-          <ol class="tasks" id="tasks"></ol>
+
+          <div class="panel" id="deck-editor" hidden>
+            <div class="panel-head"><h3>Cards</h3></div>
+            <form class="row" id="deck-form">
+              <input id="deck-input" maxlength="300" autocomplete="off" spellcheck="false" required>
+              <button class="btn" type="submit">Save</button>
+            </form>
+            <p class="muted small">Comma-separated, e.g. 1, 2, 4, XL, ☕</p>
+          </div>
         </aside>
       </div>
     </section>

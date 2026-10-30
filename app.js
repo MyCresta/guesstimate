@@ -5,7 +5,8 @@ import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 const SUPABASE_URL = 'https://qvboidhwptpiduruiyfb.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_vlH6f9yVTWmnkU8-7b_q1g_Wtz4tKf1';
 
-const DECK = ['0', '½', '1', '2', '3', '5', '8', '13', '20', '40', '100', '?', '☕'];
+const DEFAULT_DECK = ['0', '½', '1', '2', '3', '5', '8', '13', '20', '40', '100', '?', '☕'];
+const MAX_CARD_LEN = 6;
 const HEARTBEAT_MS = 20_000;   // how often we tell others we're still here
 const STALE_MS = 70_000;       // players not seen for this long are hidden
 
@@ -18,8 +19,10 @@ const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch { /* ignore */ } },
 };
+const uuid = () => (crypto.randomUUID ? crypto.randomUUID()
+  : '10000000-1000-4000-8000-100000000000'.replace(/[018]/g, (c) => (c ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4)))).toString(16)));
 let myId = store.get('gp.id');
-if (!myId) { myId = crypto.randomUUID(); store.set('gp.id', myId); }
+if (!myId) { myId = uuid(); store.set('gp.id', myId); }
 let myName = store.get('gp.name') || '';
 
 // ---------- helpers ----------
@@ -52,19 +55,40 @@ function fmt(n) {
   return Number.isInteger(n) ? String(n) : n.toFixed(1).replace(/\.0$/, '');
 }
 
-// Suggest a final estimate: the most common numeric vote (ties go to the
-// higher card), falling back to the deck card closest to the average.
-function suggestEstimate(votes) {
-  const nums = votes.map(cardValue).filter((n) => n !== null);
-  if (!nums.length) return '?';
+// Cards that mean "no estimate" and are skipped when suggesting one.
+const isNonVote = (v) => v === '?' || v === '☕';
+
+// Suggest a final estimate: the most common vote (ties go to the higher card),
+// or, if everyone voted differently, the numeric card closest to the average.
+function suggestEstimate(votes, deck) {
+  const real = votes.filter((v) => !isNonVote(v));
+  if (!real.length) return deck.find((d) => !isNonVote(d)) ?? deck[0];
   const counts = new Map();
-  for (const v of votes) if (cardValue(v) !== null) counts.set(v, (counts.get(v) || 0) + 1);
+  for (const v of real) counts.set(v, (counts.get(v) || 0) + 1);
   const top = Math.max(...counts.values());
-  const modes = [...counts].filter(([, c]) => c === top).map(([v]) => v);
-  if (modes.length === 1 || top > 1) return modes.sort((a, b) => cardValue(b) - cardValue(a))[0];
+  const byValueDesc = (a, b) => (cardValue(b) ?? deck.indexOf(b)) - (cardValue(a) ?? deck.indexOf(a));
+  const modes = [...counts].filter(([, c]) => c === top).map(([v]) => v).sort(byValueDesc);
+  const numericDeck = deck.filter((d) => cardValue(d) !== null);
+  const nums = real.map(cardValue).filter((n) => n !== null);
+  if ((modes.length === 1 || top > 1) || !nums.length || !numericDeck.length) return modes[0];
   const avg = nums.reduce((a, b) => a + b, 0) / nums.length;
-  return DECK.filter((d) => cardValue(d) !== null)
-    .reduce((best, d) => (Math.abs(cardValue(d) - avg) < Math.abs(cardValue(best) - avg) ? d : best));
+  return numericDeck.reduce((best, d) => (Math.abs(cardValue(d) - avg) < Math.abs(cardValue(best) - avg) ? d : best));
+}
+
+// "1, 2, 4, XL, ☕" -> ['1','2','4','XL','☕']
+function parseDeck(text) {
+  const cards = [...new Set(text.split(',').map((s) => s.trim()).filter(Boolean))];
+  if (cards.length < 2) return { error: 'Add at least two cards' };
+  if (cards.length > 30) return { error: 'Max 30 cards' };
+  const tooLong = cards.find((c) => [...c].length > MAX_CARD_LEN);
+  if (tooLong) return { error: `“${tooLong}” is too long (max ${MAX_CARD_LEN} characters)` };
+  return { cards };
+}
+
+// Markup for a face-up playing card.
+function cardFace(v, extra = '') {
+  const len = [...v].length;
+  return `<div class="pcard face ${extra}" data-len="${len}"><span class="idx tl">${esc(v)}</span><span class="val">${esc(v)}</span><span class="idx br">${esc(v)}</span></div>`;
 }
 
 // ---------- routing ----------
@@ -130,6 +154,7 @@ let timers = [];
 const isHost = () => !!room && room.host_id === myId;
 const currentTask = () => tasks.find((t) => t.id === room?.current_task_id) || null;
 const hostPresent = () => players.some((p) => p.id === room?.host_id);
+const deck = () => (room?.deck?.length ? room.deck : DEFAULT_DECK);
 
 function leaveRoom() {
   if (channel) { sb.removeChannel(channel); channel = null; }
@@ -162,7 +187,8 @@ async function enterRoom(code) {
   renderRoomShell();
   await Promise.all([loadPlayers(), loadTasks()]);
 
-  channel = sb.channel('room-' + code)
+  channel = sb.channel('room-' + code, { config: { broadcast: { self: false } } })
+    .on('broadcast', { event: 'throw' }, ({ payload }) => throwCard(payload))
     .on('postgres_changes', { event: '*', schema: 'public', table: 'players', filter: `room_id=eq.${code}` }, loadPlayers)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks', filter: `room_id=eq.${code}` }, loadTasks)
     // Delete events can't be filtered by room, so refresh on any task delete.
@@ -170,8 +196,9 @@ async function enterRoom(code) {
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'rooms', filter: `id=eq.${code}` }, (p) => {
       const prev = room;
       room = p.new;
-      // New task focused or re-vote: votes were cleared, so re-read them.
-      if (prev.current_task_id !== room.current_task_id || (prev.revealed && !room.revealed)) loadPlayers();
+      // New task focused, re-vote or new deck: votes were cleared, so re-read them.
+      const deckChanged = String(prev.deck) !== String(room.deck);
+      if (prev.current_task_id !== room.current_task_id || (prev.revealed && !room.revealed) || deckChanged) loadPlayers();
       renderAll();
     })
     .subscribe();
@@ -285,6 +312,115 @@ async function takeOverHost() {
   toast('You’re now the host');
 }
 
+async function saveDeck(text) {
+  if (!isHost()) return;
+  const { cards, error } = parseDeck(text);
+  if (error) return toast(error);
+  if (String(cards) === String(deck())) return;
+  room.deck = cards;
+  room.revealed = false;
+  await clearVotes();
+  renderAll();
+  const { error: err } = await sb.from('rooms').update({ deck: cards, revealed: false, updated_at: now() }).eq('id', room.id);
+  toast(err ? 'Couldn’t save cards: ' + err.message : 'Cards updated');
+}
+
+// ---------- card throwing ----------
+const SUITS = [['♠', '#1b1a2e'], ['♥', '#e8432f'], ['♦', '#e8432f'], ['♣', '#1b1a2e']];
+let lastThrow = 0;
+
+function sendThrow(targetId) {
+  if (!channel || targetId === myId) return;
+  const t = performance.now();
+  if (t - lastThrow < 180) return; // a little rate limit
+  lastThrow = t;
+  const payload = { from: myId, to: targetId, suit: Math.floor(Math.random() * SUITS.length) };
+  throwCard(payload);
+  channel.send({ type: 'broadcast', event: 'throw', payload });
+}
+
+function aceSvg(suitIdx) {
+  const [s, c] = SUITS[suitIdx % SUITS.length] || SUITS[0];
+  return `<svg viewBox="0 0 50 70" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <rect x="1.5" y="1.5" width="47" height="67" rx="6" fill="#fff8e8" stroke="#1b1a2e" stroke-width="3"/>
+    <text x="7" y="17" font-family="Fraunces, Georgia, serif" font-weight="900" font-size="14" fill="${c}">A</text>
+    <text x="25" y="46" text-anchor="middle" font-size="28" fill="${c}">${s}</text>
+    <text x="43" y="53" font-family="Fraunces, Georgia, serif" font-weight="900" font-size="14" fill="${c}" transform="rotate(180 43 53)" text-anchor="middle">A</text>
+  </svg>`;
+}
+
+function seatCenter(playerId) {
+  const el = document.querySelector(`.player[data-id="${CSS.escape(playerId)}"] .pcard`);
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+}
+
+// Animate an ace flying from the thrower to the target, spinning flat like a
+// pro card throw: fast at release, a slight curve, slowing as it lands.
+function throwCard({ from, to, suit }) {
+  const end = seatCenter(to);
+  if (!end) return;
+  const rand = (a, b) => a + Math.random() * (b - a);
+  let start = seatCenter(from);
+  if (!start) start = { x: rand(0, innerWidth), y: innerHeight + 40 }; // unknown thrower: from below
+  if (Math.hypot(end.x - start.x, end.y - start.y) < 20) start = { x: end.x + rand(-160, 160), y: end.y + 140 };
+
+  end.x += rand(-14, 14);
+  end.y += rand(-12, 12);
+
+  // Curve: a control point pushed sideways from the straight line.
+  const dx = end.x - start.x, dy = end.y - start.y;
+  const dist = Math.hypot(dx, dy);
+  const bend = rand(0.12, 0.3) * dist * (Math.random() < 0.5 ? -1 : 1);
+  const ctrl = { x: start.x + dx / 2 - (dy / dist) * bend, y: start.y + dy / 2 + (dx / dist) * bend - rand(10, 50) };
+
+  const spinDir = Math.random() < 0.5 ? -1 : 1;
+  const startRot = rand(-60, 60);
+  const totalSpin = spinDir * rand(900, 1620);   // 2.5–4.5 turns
+  const landTilt = rand(-35, 35);
+  const duration = Math.min(900, Math.max(420, dist * 1.3));
+
+  const el = document.createElement('div');
+  el.className = 'flying-card';
+  el.innerHTML = aceSvg(suit);
+  document.body.appendChild(el);
+
+  const W = 30, H = 42;
+  const frames = [];
+  const steps = 18;
+  for (let i = 0; i <= steps; i++) {
+    const lin = i / steps;
+    const t = 1 - Math.pow(1 - lin, 2.2); // ease-out: fast release, soft landing
+    const x = (1 - t) ** 2 * start.x + 2 * (1 - t) * t * ctrl.x + t ** 2 * end.x;
+    const y = (1 - t) ** 2 * start.y + 2 * (1 - t) * t * ctrl.y + t ** 2 * end.y;
+    const rot = startRot + totalSpin * t + landTilt * t;
+    const scale = 1.25 - 0.3 * t + Math.sin(lin * Math.PI) * 0.15; // rises toward the camera mid-flight
+    const tiltX = Math.sin(lin * Math.PI) * 35;                      // a bit of 3D wobble
+    frames.push({
+      transform: `translate(${x - W / 2}px, ${y - H / 2}px) rotate(${rot}deg) rotateX(${tiltX}deg) scale(${scale})`,
+      offset: lin,
+    });
+  }
+
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const fly = el.animate(frames, { duration: reduce ? 1 : duration, easing: 'linear', fill: 'forwards' });
+  fly.onfinish = () => {
+    const seat = document.querySelector(`.player[data-id="${CSS.escape(to)}"]`);
+    if (seat) {
+      seat.classList.remove('hit');
+      void seat.offsetWidth; // restart the shake animation
+      seat.classList.add('hit');
+      setTimeout(() => seat.classList.remove('hit'), 500);
+    }
+    const last = frames[frames.length - 1].transform;
+    el.animate(
+      [{ transform: last, opacity: 1 }, { transform: last, opacity: 1, offset: 0.7 }, { transform: `translateY(14px) ${last}`, opacity: 0 }],
+      { duration: 1400, easing: 'ease-in', fill: 'forwards' },
+    ).onfinish = () => el.remove();
+  };
+}
+
 // ---------- rendering ----------
 function renderRoomShell() {
   app.replaceChildren(tpl('tpl-room'));
@@ -304,16 +440,20 @@ function renderRoomShell() {
     addTask(title);
   });
 
-  const deck = $('#deck');
-  for (const v of DECK) {
-    const b = document.createElement('button');
-    b.className = 'dcard';
-    b.textContent = v;
-    b.dataset.value = v;
-    b.setAttribute('aria-label', v === '☕' ? 'Need a break' : v === '?' ? 'Not sure' : `${v} points`);
-    b.addEventListener('click', () => vote(v));
-    deck.appendChild(b);
-  }
+  $('#deck').addEventListener('click', (e) => {
+    const b = e.target.closest('.dcard');
+    if (b && !b.disabled) vote(b.dataset.value);
+  });
+
+  $('#players').addEventListener('click', (e) => {
+    const seat = e.target.closest('.player');
+    if (seat && seat.dataset.id !== myId) sendThrow(seat.dataset.id);
+  });
+
+  $('#deck-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    saveDeck($('#deck-input').value);
+  });
 }
 
 function renderAll() {
@@ -346,14 +486,19 @@ function renderTable() {
   const wrap = $('#players');
   const center = $('#table-center');
 
+  // Flip animation only the first time we draw the revealed cards.
+  const flipNow = room.revealed && !renderTable.shownRevealed;
+  renderTable.shownRevealed = room.revealed;
+
   wrap.innerHTML = players.map((p) => {
     let card;
-    if (room.revealed && p.vote) card = `<div class="pcard face">${esc(p.vote)}</div>`;
+    if (room.revealed && p.vote) card = cardFace(p.vote, flipNow ? 'reveal' : '');
     else if (p.vote) card = `<div class="pcard back" title="Voted"></div>`;
     else card = `<div class="pcard empty" title="Thinking…"></div>`;
     const crown = p.id === room.host_id ? '👑 ' : '';
-    const you = p.id === myId ? ' (you)' : '';
-    return `<div class="player${p.id === myId ? ' me' : ''}">${card}<div class="player-name" title="${esc(p.name)}">${crown}${esc(p.name)}${you}</div></div>`;
+    const me = p.id === myId;
+    const label = me ? '' : ` title="Throw a card at ${esc(p.name)}" aria-label="Throw a card at ${esc(p.name)}"`;
+    return `<button type="button" class="player${me ? ' me' : ' throwable'}" data-id="${esc(p.id)}"${label}>${card}<span class="player-name">${crown}${esc(p.name)}${me ? ' (you)' : ''}</span></button>`;
   }).join('');
 
   const voted = players.filter((p) => p.vote);
@@ -383,8 +528,8 @@ function renderTable() {
     }
 
     if (isHost()) {
-      const suggestion = suggestEstimate(voted.map((p) => p.vote));
-      const options = DECK.filter((d) => d !== '☕')
+      const suggestion = suggestEstimate(voted.map((p) => p.vote), deck());
+      const options = deck().filter((d) => d !== '☕')
         .map((d) => `<option ${d === suggestion ? 'selected' : ''}>${esc(d)}</option>`).join('');
       html += currentTask()
         ? `<form class="estimate-form" id="estimate-form">
@@ -410,7 +555,19 @@ function renderTable() {
 
 function renderDeck() {
   const me = players.find((p) => p.id === myId);
-  document.querySelectorAll('.dcard').forEach((b) => {
+  const cards = deck();
+  const deckEl = $('#deck');
+  const key = cards.join('\u0001');
+  if (deckEl.dataset.key !== key) {
+    deckEl.dataset.key = key;
+    // Each card gets a small fixed tilt so your hand looks hand-held, not gridded.
+    deckEl.innerHTML = cards.map((v, i) => {
+      const tilt = ((i * 37) % 9) - 4;
+      const label = v === '☕' ? 'Need a break' : v === '?' ? 'Not sure' : v;
+      return `<button type="button" class="dcard" data-value="${esc(v)}" style="--tilt:${tilt}deg" aria-label="${esc(label)}">${cardFace(v)}</button>`;
+    }).join('');
+  }
+  deckEl.querySelectorAll('.dcard').forEach((b) => {
     b.classList.toggle('selected', me?.vote === b.dataset.value);
     b.disabled = !!room.revealed;
   });
@@ -422,6 +579,9 @@ function renderDeck() {
 function renderTasks() {
   const host = isHost();
   $('#add-task').hidden = !host;
+  $('#deck-editor').hidden = !host;
+  const deckInput = $('#deck-input');
+  if (host && document.activeElement !== deckInput) deckInput.value = deck().join(', ');
   const done = tasks.filter((t) => t.estimate).length;
   $('#tasks-count').textContent = tasks.length ? `${done}/${tasks.length} estimated` : '';
 
