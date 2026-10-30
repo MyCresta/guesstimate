@@ -153,7 +153,9 @@ function renderNameGate(code) {
 
 // ---------- room state ----------
 let room = null;     // { id, host_id, current_task_id, revealed }
-let players = [];    // active players in this room
+let players = [];    // players shown at the table
+let allPlayers = []; // every player row in this room, including ones who left
+let presence = null; // Map of player id -> { away } from live presence; null until first sync
 let tasks = [];      // tasks in this room, in order
 let channel = null;
 let timers = [];
@@ -169,6 +171,8 @@ function leaveRoom() {
   timers = [];
   room = null;
   players = [];
+  allPlayers = [];
+  presence = null;
   tasks = [];
 }
 
@@ -186,6 +190,8 @@ async function enterRoom(code) {
     const upd = await sb.from('rooms').update({ host_id: myId }).eq('id', code).is('host_id', null).select().maybeSingle();
     if (upd.data) data = upd.data;
   }
+  // The host closed this room and opened a new one: follow everyone there.
+  if (data.moved_to) { location.hash = data.moved_to; return; }
   room = data;
 
   const join = await sb.from('players').upsert({ id: myId, room_id: code, name: myName, vote: null, last_seen: now() });
@@ -194,8 +200,10 @@ async function enterRoom(code) {
   renderRoomShell();
   await Promise.all([loadPlayers(), loadTasks()]);
 
-  channel = sb.channel('room-' + code, { config: { broadcast: { self: false } } })
+  channel = sb.channel('room-' + code, { config: { broadcast: { self: false }, presence: { key: myId } } })
     .on('broadcast', { event: 'throw' }, ({ payload }) => throwCard(payload))
+    // Live presence: someone closing their tab disappears within seconds.
+    .on('presence', { event: 'sync' }, onPresenceSync)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'players', filter: `room_id=eq.${code}` }, loadPlayers)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks', filter: `room_id=eq.${code}` }, loadTasks)
     // Delete events can't be filtered by room, so refresh on any task delete.
@@ -203,12 +211,17 @@ async function enterRoom(code) {
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'rooms', filter: `id=eq.${code}` }, (p) => {
       const prev = room;
       room = p.new;
+      if (room.moved_to) {
+        toast('The host started a new room');
+        location.hash = room.moved_to;
+        return;
+      }
       // New task focused, re-vote or new deck: votes were cleared, so re-read them.
       const deckChanged = String(prev.deck) !== String(room.deck);
       if (prev.current_task_id !== room.current_task_id || (prev.revealed && !room.revealed) || deckChanged) loadPlayers();
       renderAll();
     })
-    .subscribe();
+    .subscribe((status) => { if (status === 'SUBSCRIBED') trackMe(); });
 
   timers.push(setInterval(heartbeat, HEARTBEAT_MS));
   timers.push(setInterval(loadPlayers, 15_000)); // fallback + hides players who left
@@ -222,14 +235,48 @@ async function heartbeat() {
   if (!room) return;
   await sb.from('players').update({ last_seen: now(), room_id: room.id, name: myName }).eq('id', myId);
 }
-document.addEventListener('visibilitychange', () => { if (!document.hidden && room) { heartbeat(); loadPlayers(); } });
+// Tell the room whether we're here or away (tab in the background).
+function trackMe() {
+  channel?.track({ id: myId, away: document.hidden }).catch(() => {});
+}
+document.addEventListener('visibilitychange', () => {
+  if (!room) return;
+  trackMe();
+  if (!document.hidden) { heartbeat(); loadPlayers(); }
+});
+// Leave right away when the tab closes, instead of waiting for a timeout.
+addEventListener('pagehide', () => { channel?.untrack().catch(() => {}); });
+
+function onPresenceSync() {
+  if (!channel) return;
+  const state = channel.presenceState();
+  presence = new Map();
+  for (const [id, metas] of Object.entries(state)) {
+    // Same person in several tabs counts as away only if every tab is.
+    presence.set(id, { away: metas.every((m) => m.away) });
+  }
+  // Someone new showed up before their row reached us: fetch it.
+  if ([...presence.keys()].some((id) => !allPlayers.some((p) => p.id === id))) loadPlayers();
+  else { computePlayers(); renderAll(); }
+}
+
+function computePlayers() {
+  if (presence) {
+    players = allPlayers.filter((p) => p.id === myId || presence.has(p.id));
+    players.forEach((p) => { p.away = p.id === myId ? document.hidden : !!presence.get(p.id)?.away; });
+  } else {
+    // Before presence has synced, fall back to "seen recently".
+    const cutoff = Date.now() - STALE_MS;
+    players = allPlayers.filter((p) => p.id === myId || new Date(p.last_seen).getTime() > cutoff);
+  }
+}
 
 async function loadPlayers() {
   if (!room) return;
   const { data, error } = await sb.from('players').select('*').eq('room_id', room.id).order('created_at');
   if (error || !room) return;
-  const cutoff = Date.now() - STALE_MS;
-  players = data.filter((p) => p.id === myId || new Date(p.last_seen).getTime() > cutoff);
+  allPlayers = data;
+  computePlayers();
   renderAll();
 }
 
@@ -317,6 +364,17 @@ async function takeOverHost() {
   room.host_id = myId; renderAll();
   await sb.from('rooms').update({ host_id: myId, updated_at: now() }).eq('id', room.id);
   toast('You’re now the host');
+}
+
+// Host: close this room and move everyone to a fresh one (same cards, no tasks).
+async function startNewRoom() {
+  if (!isHost()) return;
+  if (!confirm('Close this room and move everyone to a new one?')) return;
+  const code = newRoomCode();
+  const { error } = await sb.from('rooms').insert({ id: code, host_id: myId, deck: room.deck });
+  if (error) return toast('Couldn’t create room: ' + error.message);
+  await sb.from('rooms').update({ moved_to: code, updated_at: now() }).eq('id', room.id);
+  location.hash = code;
 }
 
 async function saveDeck(text) {
@@ -505,8 +563,9 @@ function renderAll() {
 }
 
 function renderTopbar() {
-  topbarRight.innerHTML = `${isHost() ? '<span class="host-badge">👑 Host</span> · ' : ''}<span>${esc(myName)}</span> · <button class="link-btn" id="rename">Change name</button>`;
+  topbarRight.innerHTML = `${isHost() ? '<span class="host-badge">👑 Host</span> · ' : ''}<span>${esc(myName)}</span> · <button class="link-btn" id="rename">Change name</button>${isHost() ? ' · <button class="link-btn" id="new-room">New room</button>' : ''}`;
   $('#rename').addEventListener('click', () => renderNameGate(room?.id));
+  $('#new-room')?.addEventListener('click', startNewRoom);
 }
 
 function renderTitle() {
@@ -535,9 +594,10 @@ function renderTable() {
     else if (p.vote) card = `<div class="pcard back ${backColor(p.id)}" title="Voted"></div>`;
     else card = `<div class="pcard empty" title="Thinking…"></div>`;
     const crown = p.id === room.host_id ? '👑 ' : '';
+    const away = p.away && p.id !== myId;
     const me = p.id === myId;
     const label = me ? '' : ` title="Throw a card at ${esc(p.name)}" aria-label="Throw a card at ${esc(p.name)}"`;
-    return `<button type="button" class="player${me ? ' me' : ' throwable'}" data-id="${esc(p.id)}"${label}>${card}<span class="player-name">${crown}${esc(p.name)}${me ? ' (you)' : ''}</span></button>`;
+    return `<button type="button" class="player${me ? ' me' : ' throwable'}${away ? ' away' : ''}" data-id="${esc(p.id)}"${label}>${card}<span class="player-name">${crown}${esc(p.name)}${me ? ' (you)' : ''}</span>${away ? '<span class="away-tag">💤 away</span>' : ''}</button>`;
   }).join('');
 
   const voted = players.filter((p) => p.vote);

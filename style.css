@@ -307,3 +307,10 @@ input:focus, select:focus, .btn:focus-visible { outline: 3px solid var(--cobalt)
 @media (prefers-reduced-motion: reduce) {
   .pcard.reveal, .player.hit .pcard { animation: none; }
 }
+
+/* Players whose tab is in the background */
+.player.away .pcard, .player.away .player-name { opacity: .45; }
+.away-tag {
+  margin-top: -4px; font-size: 11px; font-weight: 700; color: #1b1a2e;
+  background: rgba(255,255,255,.8); padding: 0 7px; border-radius: 99px;
+}
