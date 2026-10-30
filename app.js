@@ -85,6 +85,13 @@ function parseDeck(text) {
   return { cards };
 }
 
+// Each player's deck is consistently red- or blue-backed, like two decks at a real table.
+function backColor(id) {
+  let h = 0;
+  for (const ch of String(id)) h = (h * 31 + ch.charCodeAt(0)) | 0;
+  return h & 1 ? 'back-blue' : 'back-red';
+}
+
 // Markup for a face-up playing card.
 function cardFace(v, extra = '') {
   const len = [...v].length;
@@ -409,7 +416,7 @@ function throwCard({ to, suit }) {
 
   const el = document.createElement('div');
   el.className = 'flying-card';
-  el.innerHTML = `<div class="fc-face">${aceSvg(suit)}</div><div class="fc-face fc-back"></div>`;
+  el.innerHTML = `<div class="fc-face">${aceSvg(suit)}</div><div class="fc-face fc-back ${Math.random() < 0.5 ? 'back-red' : 'back-blue'}"></div>`;
   document.body.appendChild(el);
 
   const W = 34, H = 48;
@@ -525,7 +532,7 @@ function renderTable() {
   wrap.innerHTML = players.map((p) => {
     let card;
     if (room.revealed && p.vote) card = cardFace(p.vote, flipNow ? 'reveal' : '');
-    else if (p.vote) card = `<div class="pcard back" title="Voted"></div>`;
+    else if (p.vote) card = `<div class="pcard back ${backColor(p.id)}" title="Voted"></div>`;
     else card = `<div class="pcard empty" title="Thinking…"></div>`;
     const crown = p.id === room.host_id ? '👑 ' : '';
     const me = p.id === myId;
