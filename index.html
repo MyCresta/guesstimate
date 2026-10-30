@@ -50,18 +50,37 @@
   <template id="tpl-room">
     <section class="room">
       <div class="room-head">
-        <input id="topic" class="topic" maxlength="200" placeholder="What are we estimating? (e.g. JIRA-123 Login form)">
+        <div class="focus-title">
+          <span class="eyebrow">Now estimating</span>
+          <h2 id="current-title">No task selected</h2>
+        </div>
         <button class="btn" id="copy-link" title="Copy invite link">🔗 Copy invite link</button>
       </div>
 
-      <div class="table" id="table">
-        <div class="players" id="players"></div>
-        <div class="table-center" id="table-center"></div>
-      </div>
+      <div class="room-grid">
+        <div class="play-area">
+          <div class="table" id="table">
+            <div class="players" id="players"></div>
+            <div class="table-center" id="table-center"></div>
+          </div>
 
-      <div class="deck-wrap">
-        <p class="muted deck-hint" id="deck-hint">Pick a card</p>
-        <div class="deck" id="deck"></div>
+          <div class="deck-wrap">
+            <p class="muted deck-hint" id="deck-hint">Pick a card</p>
+            <div class="deck" id="deck"></div>
+          </div>
+        </div>
+
+        <aside class="tasks-panel">
+          <div class="tasks-head">
+            <h3>Tasks</h3>
+            <span class="muted small" id="tasks-count"></span>
+          </div>
+          <form class="row add-task" id="add-task">
+            <input id="task-input" maxlength="200" placeholder="Add a task, e.g. JIRA-123 Login form" autocomplete="off" required>
+            <button class="btn" type="submit">Add</button>
+          </form>
+          <ol class="tasks" id="tasks"></ol>
+        </aside>
       </div>
     </section>
   </template>
